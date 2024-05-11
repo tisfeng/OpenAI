@@ -51,8 +51,8 @@ final class StreamingSession<ResultType: Codable>: NSObject, Identifiable, URLSe
         
         let incorrectMimeTypes = [ "text/html" ]
         
-        if error != nil, let mimeType = task.response?.mimeType, incorrectMimeTypes.contains(mimeType) {
-            onComplete?(self, HTTPError.incorrectContentType("Incorrect Content-Type, or bad endpoint, please check Query URL"))
+        if error == nil, let mimeType = task.response?.mimeType, incorrectMimeTypes.contains(mimeType) {
+            onComplete?(self, HTTPError.incorrectContentType(mimeType))
         } else {
             onComplete?(self, error)
         }
@@ -113,4 +113,13 @@ extension StreamingSession {
 
 enum HTTPError: Error {
     case incorrectContentType(String)
+}
+
+extension HTTPError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .incorrectContentType(let message):
+            return "Incorrect Content-Type: \(message), this may be caused by a wrong endpoint."
+        }
+    }
 }
