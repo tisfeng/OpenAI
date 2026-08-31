@@ -33,6 +33,7 @@ final class StreamingSession<ResultType: Codable>: NSObject, Identifiable, URLSe
     }()
 
     private var previousChunkBuffer = ""
+    private var previousByteBuffer = Data()
 
     // Property to keep track of the URLSessionTask
     private var dataTask: URLSessionDataTask?
@@ -70,7 +71,21 @@ final class StreamingSession<ResultType: Codable>: NSObject, Identifiable, URLSe
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let stringContent = String(data: data, encoding: .utf8) else {
+        /**
+         A chunk boundary can fall inside a multi-byte character, so the tail of a chunk may hold the
+         first bytes of a character whose continuation bytes have not arrived yet. Decoding that tail
+         on its own fails, which used to abort the whole stream — reliably hit by CJK responses, where
+         most characters are 3 bytes wide.
+         */
+        previousByteBuffer.append(data)
+        let (wholeCharacters, partialCharacter) = previousByteBuffer
+            .splittingTrailingIncompleteUTF8Character()
+        previousByteBuffer = partialCharacter
+
+        guard !wholeCharacters.isEmpty else {
+            return  // The whole chunk is the start of a character; wait for the rest.
+        }
+        guard let stringContent = String(data: wholeCharacters, encoding: .utf8) else {
             onProcessingError?(self, StreamingError.unknownContent)
             return
         }
@@ -129,6 +144,44 @@ extension StreamingSession {
                 }
             }
         }
+    }
+}
+
+extension Data {
+
+    /// Splits off a trailing byte sequence that begins a UTF-8 character but does not complete it.
+    ///
+    /// Returns the leading bytes that form whole characters, and the trailing bytes of a character
+    /// still missing its continuation bytes. The partial part is empty when the data already ends on
+    /// a character boundary, and also when the trailing bytes cannot start a valid character at all —
+    /// a genuine encoding error is surfaced to the caller rather than buffered forever.
+    func splittingTrailingIncompleteUTF8Character() -> (whole: Data, partial: Data) {
+        var index = endIndex - 1
+        var trailingByteCount = 1
+
+        // A UTF-8 character spans at most 4 bytes, so its lead byte is at most 3 bytes from the end.
+        while index >= startIndex, trailingByteCount <= 4 {
+            let byte = self[index]
+            let isContinuationByte = byte & 0b1100_0000 == 0b1000_0000
+            if !isContinuationByte {
+                let characterLength: Int
+                switch byte {
+                case 0x00...0x7F: characterLength = 1
+                case 0xC2...0xDF: characterLength = 2
+                case 0xE0...0xEF: characterLength = 3
+                case 0xF0...0xF4: characterLength = 4
+                default: return (self, Data())  // Not a lead byte, let decoding report it.
+                }
+                guard characterLength > trailingByteCount else {
+                    return (self, Data())
+                }
+                return (Data(self[..<index]), Data(self[index...]))
+            }
+            index -= 1
+            trailingByteCount += 1
+        }
+
+        return (self, Data())
     }
 }
 
